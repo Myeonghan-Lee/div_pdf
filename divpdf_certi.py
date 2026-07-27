@@ -33,9 +33,13 @@ if uploaded_file is not None:
             # 텍스트 추출 시 줄바꿈이나 공백으로 인한 오류를 줄이기 위해 공백 제거
             clean_text = text.replace('\n', '').replace(' ', '')
             
-            # 이름 추출 로직 (성명:홍길동 또는 성:홍길동 패턴 모두 대비)
-            name_match = re.search(r"(성명:|성:)([가-힣]+)", clean_text)
-            name = name_match.group(2).replace("명", "") if name_match else f"이름알수없음_페이지{i+1}"
+            # [수정된 부분] 이름 추출 로직: '생년월일' 글자 앞까지만 추출하도록 변경
+            name_match = re.search(r"(성명:|성:)(.+?)생년월일", clean_text)
+            if name_match:
+                # 추출된 그룹에서 이름만 가져오고, 간혹 섞이는 '명' 글자 제거
+                name = name_match.group(2).replace("명", "")
+            else:
+                name = f"이름알수없음_페이지{i+1}"
             
             # 생년월일 추출 로직 (생년월일:1981.01.09 패턴 대비)
             birth_match = re.search(r"생년월일:(\d{4})\.(\d{2})\.(\d{2})", clean_text)
@@ -44,7 +48,7 @@ if uploaded_file is not None:
             else:
                 birth = "생년월일알수없음"
             
-            # 최종 파일명 생성
+            # 최종 파일명 생성 (예: 이용민_19810109.pdf)
             filename = f"{name}_{birth}.pdf"
             
             # 개별 페이지를 새로운 PDF로 만들기
