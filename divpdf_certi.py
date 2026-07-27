@@ -32,34 +32,45 @@ if uploaded_file is not None:
                 # 이미지에서 한국어 텍스트 추출 (OCR)
                 text = pytesseract.image_to_string(img, lang='kor')
                 
-                # 공백 및 줄바꿈 제거
+                # 공백 및 줄바꿈을 모두 제거하여 하나의 문자열로 압축
                 clean_text = text.replace('\n', '').replace(' ', '')
                 
-                # [수정된 부분 1] 이름 추출: '성~:' 뒤부터 '생년' 앞까지의 텍스트 추출
-                # 성.*?: -> '성'으로 시작해서 ':'이 나올 때까지의 모든 문자 무시
-                name_match = re.search(r"성.*?:(.*?)생년", clean_text)
+                # ---------------------------------------------------------
+                # 1. 이름 추출: "성*:" 뒤에 있는 이름 찾기
+                # [:;>\]\|] -> OCR이 콜론(:)을 다른 기호로 잘못 인식해도 커버
+                # (?=[0-9]|생|년) -> 숫자나 '생', '년' 글자가 나오기 전까지만 캡처
+                # ---------------------------------------------------------
+                name_match = re.search(r"성.*?[:;>\]\|](.*?)(?=[0-9]|생|년)", clean_text)
+                
+                # 만약 OCR이 콜론을 아예 인식하지 못해 누락한 경우의 플랜 B
+                if not name_match:
+                    name_match = re.search(r"성.*?명(.*?)(?=[0-9]|생|년)", clean_text)
+                
                 if name_match:
-                    name_raw = name_match.group(1)
-                    # 이름 사이에 섞여 들어간 특수문자나 숫자 제거 (한글/영문만 남김)
-                    name = re.sub(r'[^가-힣A-Za-z]', '', name_raw)
-                    # 혹시 '명' 글자가 잘못 딸려온 경우 대비
-                    name = name.lstrip('명')
+                    # 추출된 결과에서 한글과 영문만 남기고 특수기호/숫자 찌꺼기 완벽 제거
+                    name = re.sub(r'[^가-힣A-Za-z]', '', name_match.group(1))
+                    
+                    # 간혹 OCR 읽기 순서 오류로 이름 앞에 '명'이 딸려온 경우만 제거 (예: 명홍길동 -> 홍길동)
+                    name = re.sub(r'^명', '', name)
                     
                     if not name:
                         name = f"이름인식실패_페이지{i+1}"
                 else:
                     name = f"이름인식실패_페이지{i+1}"
                 
-                # [수정된 부분 2] 생년월일 추출: '생년~:' 뒤에 나오는 숫자 8자리 조합 (사이에 어떤 기호가 있든 무시)
-                # 생년.*?: -> '생년'으로 시작해서 ':'이 나올 때까지 무시
-                # [^\d]* -> 숫자 이외의 문자(온점, 쉼표, 오타 등) 무시
-                birth_match = re.search(r"생년.*?:[^\d]*(\d{4})[^\d]*(\d{2})[^\d]*(\d{2})", clean_text)
+                # ---------------------------------------------------------
+                # 2. 생년월일 추출: "생년*:" 뒤에 있는 숫자 찾기
+                # 생.*?년 -> '생'과 '년' 사이에 이상한 기호가 껴있어도 통과
+                # [^\d]*(\d{4})... -> 숫자 8자리(4-2-2) 사이에 온점(.)이 없거나 쉼표(,)가 껴있어도 무시하고 숫자만 수집
+                # ---------------------------------------------------------
+                birth_match = re.search(r"생.*?년.*?[:;>\]\|]?[^\d]*(\d{4})[^\d]*(\d{2})[^\d]*(\d{2})", clean_text)
+                
                 if birth_match:
                     birth = f"{birth_match.group(1)}{birth_match.group(2)}{birth_match.group(3)}"
                 else:
                     birth = "생년월일인식실패"
                 
-                # 최종 파일명
+                # 최종 파일명 조합
                 filename = f"{name}_{birth}.pdf"
                 
                 # 이미지를 PDF로 변환하여 메모리에 저장 (수정 방지 효과)
@@ -82,4 +93,4 @@ if uploaded_file is not None:
         
     except Exception as e:
         st.error(f"오류가 발생했습니다: {e}")
-        st.write("로컬 환경에서 실행 중이라면 Tesseract와 Poppler가 시스템에 설치되어 있는지 확인해주세요.")
+        st.write("시스템에 Tesseract와 Poppler가 정상적으로 설치되어 있는지 확인해주세요.")
