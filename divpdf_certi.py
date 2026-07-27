@@ -4,93 +4,79 @@ import zipfile
 import re
 from pdf2image import convert_from_bytes
 import pytesseract
+from PIL import Image
 
 st.set_page_config(page_title="PDF 분리 및 보안 처리", page_icon="📄")
-
 st.title("📄 이수증 PDF 분리 (OCR 및 수정 방지)")
-st.write("PDF의 내용을 이미지로 인식(OCR)하여 파일을 분리하며, 결과물은 텍스트 수정이 불가능한 '이미지형 PDF'로 제공됩니다.")
+st.write("PDF를 이미지로 인식(OCR)하여 사람별로 분리하며, 결과물은 수정 불가한 '이미지형 PDF'로 제공됩니다.")
 
-# 파일 업로더
+# ---------- 유틸 함수 ----------
+def normalize_digits(s):
+    """OCR이 숫자를 알파벳/기호로 오인식하는 대표 케이스 교정"""
+    table = str.maketrans({
+        'O': '0', 'o': '0', 'Q': '0', 'D': '0',
+        'I': '1', 'l': '1', '|': '1', 'L': '1',
+        'Z': '2', 'z': '2', 'S': '5', 's': '5',
+        'B': '8', 'g': '9', 'b': '6',
+    })
+    return s.translate(table)
+
+def extract_name(clean_text):
+    # 1순위: '성명' 두 글자에 앵커 → '성남시' 등 오매칭 방지, 이름 뒤 경계 지정
+    stop = r"(?=생|년|월|일|주|과|[0-9]|[A-Za-z]|$)"   # 수/교는 이름 글자와 충돌하므로 제외
+    m = re.search(r"성\s*명\s*[:;>$\|)]*\s*([가-힣]{2,4}?)" + stop, clean_text)
+    if m:
+        return m.group(1)
+    # 2순위: '명'이 깨진 경우 대비 (구분기호는 필수)
+    m = re.search(r"성[가-힣]?[:;>$\|)]+([가-힣]{2,4}?)" + stop, clean_text)
+    if m:
+        return m.group(1)
+    return None
+
+def extract_birth(clean_text):
+    # '생년월일' 라벨 이후 15자 구간을 잘라 숫자 정규화 후 파싱
+    m = re.search(r"생\s*년\s*월?\s*일?\s*[:;>$\|)]*(.{0,15})", clean_text)
+    region = normalize_digits(m.group(1)) if m else ""
+    d = re.search(r"(\d{4})\D?(\d{1,2})\D?(\d{1,2})", region)
+    if d:
+        return f"{d.group(1)}{d.group(2).zfill(2)}{d.group(3).zfill(2)}"
+    # fallback: 라벨 없이 전체에서 19xx/20xx 날짜 탐색
+    d = re.search(r"((?:19|20)\d{2})\D{0,2}(\d{1,2})\D{0,2}(\d{1,2})",
+                  normalize_digits(clean_text))
+    if d:
+        return f"{d.group(1)}{d.group(2).zfill(2)}{d.group(3).zfill(2)}"
+    return None
+
+def preprocess(img):
+    """OCR 정확도 향상을 위한 그레이스케일 + 대비/이진화"""
+    gray = img.convert("L")
+    # 임계값 이진화 (스캔 품질에 따라 150~180 조정 가능)
+    bw = gray.point(lambda x: 0 if x < 160 else 255, mode="1")
+    return bw
+
+# ---------- 메인 로직 ----------
 uploaded_file = st.file_uploader("PDF 파일을 업로드해주세요", type=["pdf"])
+debug = st.checkbox("🔍 디버그 모드 (OCR 원문 보기)", value=False)
 
 if uploaded_file is not None:
     pdf_bytes = uploaded_file.read()
-    
     st.info("PDF를 이미지로 변환하고 텍스트를 분석 중입니다. (시간이 다소 소요될 수 있습니다)")
-    
+
     try:
-        # PDF의 모든 페이지를 이미지 리스트로 변환
-        images = convert_from_bytes(pdf_bytes)
+        # 핵심 1) 해상도 300dpi로 상향 → OCR 정확도 대폭 향상
+        images = convert_from_bytes(pdf_bytes, dpi=300)
         total_pages = len(images)
-        
-        # 메모리 상에 ZIP 파일을 만들기 위한 버퍼
         zip_buffer = io.BytesIO()
         success_count = 0
-        
+        results = []
+
+        # 핵심 2) Tesseract 설정 최적화 (LSTM 엔진 + 균일 블록 가정 + 한/영 병행)
+        ocr_config = r"--oem 1 --psm 6"
+
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             for i, img in enumerate(images):
-                # 이미지에서 한국어 텍스트 추출 (OCR)
-                text = pytesseract.image_to_string(img, lang='kor')
-                
-                # 공백 및 줄바꿈을 모두 제거하여 하나의 문자열로 압축
-                clean_text = text.replace('\n', '').replace(' ', '')
-                
-                # ---------------------------------------------------------
-                # 1. 이름 추출: "성*:" 뒤에 있는 이름 찾기
-                # [:;>\]\|] -> OCR이 콜론(:)을 다른 기호로 잘못 인식해도 커버
-                # (?=[0-9]|생|년) -> 숫자나 '생', '년' 글자가 나오기 전까지만 캡처
-                # ---------------------------------------------------------
-                name_match = re.search(r"성.*?[:;>\]\|](.*?)(?=[0-9]|생|년)", clean_text)
-                
-                # 만약 OCR이 콜론을 아예 인식하지 못해 누락한 경우의 플랜 B
-                if not name_match:
-                    name_match = re.search(r"성.*?명(.*?)(?=[0-9]|생|년)", clean_text)
-                
-                if name_match:
-                    # 추출된 결과에서 한글과 영문만 남기고 특수기호/숫자 찌꺼기 완벽 제거
-                    name = re.sub(r'[^가-힣A-Za-z]', '', name_match.group(1))
-                    
-                    # 간혹 OCR 읽기 순서 오류로 이름 앞에 '명'이 딸려온 경우만 제거 (예: 명홍길동 -> 홍길동)
-                    name = re.sub(r'^명', '', name)
-                    
-                    if not name:
-                        name = f"이름인식실패_페이지{i+1}"
-                else:
-                    name = f"이름인식실패_페이지{i+1}"
-                
-                # ---------------------------------------------------------
-                # 2. 생년월일 추출: "생년*:" 뒤에 있는 숫자 찾기
-                # 생.*?년 -> '생'과 '년' 사이에 이상한 기호가 껴있어도 통과
-                # [^\d]*(\d{4})... -> 숫자 8자리(4-2-2) 사이에 온점(.)이 없거나 쉼표(,)가 껴있어도 무시하고 숫자만 수집
-                # ---------------------------------------------------------
-                birth_match = re.search(r"생.*?년.*?[:;>\]\|]?[^\d]*(\d{4})[^\d]*(\d{2})[^\d]*(\d{2})", clean_text)
-                
-                if birth_match:
-                    birth = f"{birth_match.group(1)}{birth_match.group(2)}{birth_match.group(3)}"
-                else:
-                    birth = "생년월일인식실패"
-                
-                # 최종 파일명 조합
-                filename = f"{name}_{birth}.pdf"
-                
-                # 이미지를 PDF로 변환하여 메모리에 저장 (수정 방지 효과)
-                pdf_buffer = io.BytesIO()
-                img.save(pdf_buffer, format='PDF', resolution=100.0)
-                
-                # ZIP 파일에 추가
-                zip_file.writestr(filename, pdf_buffer.getvalue())
-                success_count += 1
-                
-        st.success(f"성공적으로 {success_count}개의 파일을 분리 및 보안 처리했습니다!")
-        
-        # 다운로드 버튼
-        st.download_button(
-            label="📦 보호된 분리 파일 전체 다운로드 (ZIP)",
-            data=zip_buffer.getvalue(),
-            file_name="수정불가_이수증.zip",
-            mime="application/zip"
-        )
-        
-    except Exception as e:
-        st.error(f"오류가 발생했습니다: {e}")
-        st.write("시스템에 Tesseract와 Poppler가 정상적으로 설치되어 있는지 확인해주세요.")
+                proc = preprocess(img)
+                text = pytesseract.image_to_string(proc, lang="kor+eng", config=ocr_config)
+                clean_text = text.replace("\n", "").replace(" ", "")
+
+                name = extract_name(clean_text) or f"이름인
