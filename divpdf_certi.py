@@ -79,4 +79,39 @@ if uploaded_file is not None:
                 text = pytesseract.image_to_string(proc, lang="kor+eng", config=ocr_config)
                 clean_text = text.replace("\n", "").replace(" ", "")
 
-                name = extract_name(clean_text) or f"이름인
+                name = extract_name(clean_text) or f"이름인식실패_페이지{i+1}"
+                birth = extract_birth(clean_text) or "생년월일인식실패"
+
+                filename = f"{name}_{birth}.pdf"
+                results.append((i + 1, name, birth))
+
+                # 원본 이미지를 이미지형 PDF로 저장 (화질 보존 위해 원본 img 사용)
+                pdf_buffer = io.BytesIO()
+                img.save(pdf_buffer, format="PDF", resolution=200.0)
+                zip_file.writestr(filename, pdf_buffer.getvalue())
+                success_count += 1
+
+                if debug:
+                    with st.expander(f"[페이지 {i+1}] {filename}"):
+                        st.text(text[:500])
+
+        st.success(f"성공적으로 {success_count}개의 파일을 분리 및 보안 처리했습니다!")
+
+        # 추출 결과 요약 표 (인식 실패 건 즉시 확인 가능)
+        st.dataframe(
+            {"페이지": [r[0] for r in results],
+             "이름": [r[1] for r in results],
+             "생년월일": [r[2] for r in results]},
+            use_container_width=True,
+        )
+
+        st.download_button(
+            label="📦 보호된 분리 파일 전체 다운로드 (ZIP)",
+            data=zip_buffer.getvalue(),
+            file_name="수정불가_이수증.zip",
+            mime="application/zip",
+        )
+
+    except Exception as e:
+        st.error(f"오류가 발생했습니다: {e}")
+        st.write("시스템에 Tesseract와 Poppler가 정상적으로 설치되어 있는지 확인해주세요.")
